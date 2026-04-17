@@ -24,7 +24,6 @@
  */
 
 namespace block_stash\privacy;
-defined('MOODLE_INTERNAL') || die();
 
 use context;
 use context_course;
@@ -36,7 +35,10 @@ use block_stash\swap;
 use block_stash\user_item;
 use core_privacy\local\metadata\collection;
 use core_privacy\local\request\approved_contextlist;
+use core_privacy\local\request\approved_userlist;
+use core_privacy\local\request\contextlist;
 use core_privacy\local\request\transform;
+use core_privacy\local\request\userlist;
 use core_privacy\local\request\writer;
 
 /**
@@ -49,17 +51,15 @@ use core_privacy\local\request\writer;
  */
 class provider implements
     \core_privacy\local\metadata\provider,
+    \core_privacy\local\request\core_userlist_provider,
     \core_privacy\local\request\plugin\provider {
-
-    use \core_privacy\local\legacy_polyfill;
-
     /**
      * Returns metadata.
      *
-     * @param collection $collection The initialised collection to add items to.
-     * @return collection A listing of user data stored through this system.
+     * @param collection $collection
+     * @return collection
      */
-    public static function _get_metadata($collection) {
+    public static function get_metadata(collection $collection): collection {
 
         $collection->add_database_table(user_item::TABLE, [
             'itemid' => 'privacy:metadata:useritem:itemid',
@@ -93,14 +93,15 @@ class provider implements
     }
 
     /**
-     * Get the list of contexts that contain user information for the specified user.
+     * Get the list of contexts that contain user
+     * information for the specified user.
      *
-     * @param int $userid The user to search.
-     * @return contextlist $contextlist The contextlist containing the list of contexts used in this plugin.
+     * @param int $userid
+     * @return contextlist $contextlist
      */
-    public static function _get_contexts_for_userid($userid) {
+    public static function get_contexts_for_userid(int $userid): contextlist {
         global $DB;
-        $contextlist = new \core_privacy\local\request\contextlist();
+        $contextlist = new contextlist();
 
         $sql = "SELECT ctx.id
                   FROM {" . user_item::TABLE . "} ui
@@ -150,17 +151,18 @@ class provider implements
     }
 
     /**
-     * Export all user data for the specified user, in the specified contexts.
+     * Export all user data for the specified user,
+     * in the specified contexts.
      *
-     * @param approved_contextlist $contextlist The approved contexts to export information for.
+     * @param approved_contextlist $contextlist
      */
-    public static function _export_user_data(approved_contextlist $contextlist) {
+    public static function export_user_data(approved_contextlist $contextlist) {
         global $DB;
 
         $userid = $contextlist->get_user()->id;
-        $courseids = array_map(function($context) {
+        $courseids = array_map(function ($context) {
             return $context->instanceid;
-        }, array_filter($contextlist->get_contexts(), function($context) {
+        }, array_filter($contextlist->get_contexts(), function ($context) {
             return $context->contextlevel == CONTEXT_COURSE;
         }));
 
@@ -168,7 +170,7 @@ class provider implements
             return;
         }
 
-        list($insql, $inparams) = $DB->get_in_or_equal($courseids, SQL_PARAMS_NAMED);
+        [$insql, $inparams] = $DB->get_in_or_equal($courseids, SQL_PARAMS_NAMED);
         $uniqueid = $DB->sql_concat_join("'-'", ['i.id', 'COALESCE(ui.id, 0)', 'COALESCE(d.id, 0)', 'COALESCE(dp.id, 0)']);
         $sql = "
             SELECT $uniqueid AS uniqueid,
@@ -196,14 +198,14 @@ class provider implements
           ORDER BY s.courseid, ui.id, dp.id";
         $params = array_merge($inparams, ['userid1' => $userid, 'userid2' => $userid]);
         $recordset = $DB->get_recordset_sql($sql, $params);
-        static::recordset_loop_and_export($recordset, 'courseid', [], function($carry, $record) {
+        static::recordset_loop_and_export($recordset, 'courseid', [], function ($carry, $record) {
             $id = $record->itemid;
 
             if (!isset($carry[$id])) {
                 $carry[$id] = [
                     'name' => $record->itemname,
                     'owned' => 0,
-                    'pickups' => []
+                    'pickups' => [],
                 ];
                 if (!empty($record->qty)) {
                     $carry[$id]['owned'] = (int) $record->qty;
@@ -214,13 +216,12 @@ class provider implements
                 $carry[$id]['pickups'][] = [
                     'location' => $record->dropname,
                     'quantity' => $record->pickupcount,
-                    'last_pickup' => transform::datetime($record->lastpickup)
+                    'last_pickup' => transform::datetime($record->lastpickup),
                 ];
             }
 
             return $carry;
-
-        }, function($courseid, $data) {
+        }, function ($courseid, $data) {
             writer::with_context(context_course::instance($courseid))->export_data(
                 [get_string('pluginname', 'block_stash')],
                 (object) ['items' => array_values($data)]
@@ -238,10 +239,9 @@ class provider implements
                  LEFT JOIN {block_stash_items} i ON ui.itemid = i.id
                      WHERE (ss.initiator = :userid OR ss.receiver = :ruserid)
                        AND s.courseid $insql";
-        // print_object($swapsql);
         $params = array_merge($inparams, ['userid' => $userid, 'ruserid' => $userid]);
         $recordset = $DB->get_recordset_sql($swapsql, $params);
-        static::recordset_loop_and_export($recordset, 'courseid', [], function($carry, $record) {
+        static::recordset_loop_and_export($recordset, 'courseid', [], function ($carry, $record) {
 
             $userid = $record->userid ?? 0;
 
@@ -252,13 +252,11 @@ class provider implements
                 'intiatorid' => $record->initiator,
                 'recieverid' => $record->receiver,
                 'timecreated' => transform::datetime($record->timecreated),
-                'status' => static::transform_swap_status($record->status)
+                'status' => static::transform_swap_status($record->status),
             ];
 
             return $carry;
-
-
-        }, function($courseid, $data) {
+        }, function ($courseid, $data) {
             writer::with_context(context_course::instance($courseid))->export_related_data(
                 [get_string('pluginname', 'block_stash')],
                 'trades',
@@ -270,9 +268,9 @@ class provider implements
     /**
      * Delete all data for all users in the specified context.
      *
-     * @param context $context The specific context to delete data for.
+     * @param context $context
      */
-    public static function _delete_data_for_all_users_in_context(context $context) {
+    public static function delete_data_for_all_users_in_context(context $context) {
         global $DB;
         if ($context->contextlevel != CONTEXT_COURSE) {
             return;
@@ -285,7 +283,7 @@ class provider implements
         }
 
         // Delete the items from users..
-        list($insql, $inparams) = $DB->get_in_or_equal($itemids, SQL_PARAMS_NAMED);
+        [$insql, $inparams] = $DB->get_in_or_equal($itemids, SQL_PARAMS_NAMED);
         $DB->delete_records_select(user_item::TABLE, "itemid $insql", $inparams);
 
         // Find the relevant drop IDs.
@@ -295,7 +293,7 @@ class provider implements
         }
 
         // Delete the drop pickups.
-        list($insql, $inparams) = $DB->get_in_or_equal($dropids, SQL_PARAMS_NAMED);
+        [$insql, $inparams] = $DB->get_in_or_equal($dropids, SQL_PARAMS_NAMED);
         $DB->delete_records_select(drop_pickup::TABLE, "dropid $insql", $inparams);
 
         // Delete all swap details and then swaps.
@@ -304,7 +302,7 @@ class provider implements
             return;
         }
 
-        list($insql, $inparams) = $DB->get_in_or_equal($swapdetailids, SQL_PARAMS_NAMED);
+        [$insql, $inparams] = $DB->get_in_or_equal($swapdetailids, SQL_PARAMS_NAMED);
         $DB->delete_records_select('block_stash_swap_detail', "id $insql", $inparams);
 
         $stashids = static::get_stashids_from_courseids([$context->instanceid]);
@@ -312,32 +310,31 @@ class provider implements
             return;
         }
 
-        list($insql, $inparams) = $DB->get_in_or_equal($stashids, SQL_PARAMS_NAMED);
+        [$insql, $inparams] = $DB->get_in_or_equal($stashids, SQL_PARAMS_NAMED);
         $DB->delete_records_select('block_stash_swap', "stashid $insql", $inparams);
-
     }
 
     /**
-     * Delete all user data for the specified user, in the specified contexts.
+     * Delete all user data for the specified user,
+     * in the specified contexts.
      *
-     * @param approved_contextlist $contextlist The approved contexts and user information to delete information for.
+     * @param approved_contextlist $contextlist
      */
-    public static function _delete_data_for_user(approved_contextlist $contextlist) {
+    public static function delete_data_for_user(approved_contextlist $contextlist) {
         global $DB;
 
         $userid = $contextlist->get_user()->id;
 
-        $courseids = array_map(function($context) {
+        $courseids = array_map(function ($context) {
             return $context->instanceid;
-        }, array_filter($contextlist->get_contexts(), function($context) {
+        }, array_filter($contextlist->get_contexts(), function ($context) {
             return $context->contextlevel == CONTEXT_COURSE;
         }));
 
         $itemids = static::get_itemids_from_courseids($courseids);
         if (!empty($itemids)) {
-
             // Delete the items a user has.
-            list($initemsql, $initemparams) = $DB->get_in_or_equal($itemids, SQL_PARAMS_NAMED);
+            [$initemsql, $initemparams] = $DB->get_in_or_equal($itemids, SQL_PARAMS_NAMED);
             $params = array_merge($initemparams, ['userid' => $userid]);
             $DB->delete_records_select(user_item::TABLE, "userid = :userid AND itemid $initemsql", $params);
 
@@ -345,13 +342,13 @@ class provider implements
             $dropids = static::get_dropids_from_itemids($itemids);
             if (!empty($dropids)) {
                 // Delete the drop pickups.
-                list($indropsql, $indropparams) = $DB->get_in_or_equal($dropids, SQL_PARAMS_NAMED);
+                [$indropsql, $indropparams] = $DB->get_in_or_equal($dropids, SQL_PARAMS_NAMED);
                 $params = array_merge($indropparams, ['userid' => $userid]);
                 $DB->delete_records_select(drop_pickup::TABLE, "userid = :userid AND dropid $indropsql", $params);
             }
         }
 
-        list($coursesql, $courseparams) = $DB->get_in_or_equal($courseids, SQL_PARAMS_NAMED);
+        [$coursesql, $courseparams] = $DB->get_in_or_equal($courseids, SQL_PARAMS_NAMED);
 
         // Delete swaps and swap detail.
         $sql = "SELECT sd.id
@@ -378,9 +375,121 @@ class provider implements
     }
 
     /**
+     * Get the list of users who have data within a context.
+     *
+     * @param userlist $userlist
+     */
+    public static function get_users_in_context(userlist $userlist) {
+        $context = $userlist->get_context();
+
+        if ($context->contextlevel != CONTEXT_COURSE) {
+            return;
+        }
+
+        $sql = "SELECT ui.userid
+                  FROM {" . user_item::TABLE . "} ui
+                  JOIN {" . item::TABLE . "} i
+                    ON i.id = ui.itemid
+                  JOIN {" . stash::TABLE . "} s
+                    ON s.id = i.stashid
+                 WHERE s.courseid = :courseid1
+                UNION
+                SELECT dp.userid
+                  FROM {" . drop_pickup::TABLE . "} dp
+                  JOIN {" . drop::TABLE . "} d
+                    ON d.id = dp.dropid
+                  JOIN {" . item::TABLE . "} i
+                    ON i.id = d.itemid
+                  JOIN {" . stash::TABLE . "} s
+                    ON s.id = i.stashid
+                 WHERE s.courseid = :courseid2
+                UNION
+                SELECT ss.initiator AS userid
+                  FROM {block_stash_swap} ss
+                  JOIN {" . stash::TABLE . "} s
+                    ON s.id = ss.stashid
+                 WHERE s.courseid = :courseid3
+                UNION
+                SELECT ss.receiver AS userid
+                  FROM {block_stash_swap} ss
+                  JOIN {" . stash::TABLE . "} s
+                    ON s.id = ss.stashid
+                 WHERE s.courseid = :courseid4";
+
+        $userlist->add_from_sql('userid', $sql, [
+            'courseid1' => $context->instanceid,
+            'courseid2' => $context->instanceid,
+            'courseid3' => $context->instanceid,
+            'courseid4' => $context->instanceid,
+        ]);
+    }
+
+    /**
+     * Delete multiple users within a single context.
+     *
+     * @param approved_userlist $userlist
+     */
+    public static function delete_data_for_users(approved_userlist $userlist) {
+        global $DB;
+
+        $context = $userlist->get_context();
+        if ($context->contextlevel != CONTEXT_COURSE) {
+            return;
+        }
+
+        $userids = $userlist->get_userids();
+        if (empty($userids)) {
+            return;
+        }
+
+        $itemids = static::get_itemids_from_courseids([$context->instanceid]);
+        [$userinsql, $userparams] = $DB->get_in_or_equal($userids, SQL_PARAMS_NAMED, 'userid');
+
+        if (!empty($itemids)) {
+            [$iteminsql, $itemparams] = $DB->get_in_or_equal($itemids, SQL_PARAMS_NAMED, 'itemid');
+            $params = array_merge($userparams, $itemparams);
+            $DB->delete_records_select(user_item::TABLE, "userid $userinsql AND itemid $iteminsql", $params);
+
+            $dropids = static::get_dropids_from_itemids($itemids);
+            if (!empty($dropids)) {
+                [$dropinsql, $dropparams] = $DB->get_in_or_equal($dropids, SQL_PARAMS_NAMED, 'dropid');
+                $params = array_merge($userparams, $dropparams);
+                $DB->delete_records_select(drop_pickup::TABLE, "userid $userinsql AND dropid $dropinsql", $params);
+            }
+        }
+
+        $sql = "SELECT sd.id
+                  FROM {block_stash_swap_detail} sd
+                  JOIN {block_stash_swap} ss
+                    ON ss.id = sd.swapid
+                  JOIN {" . stash::TABLE . "} s
+                    ON s.id = ss.stashid
+                 WHERE s.courseid = :courseid
+                   AND (ss.initiator $userinsql OR ss.receiver $userinsql)";
+
+        $params = array_merge(['courseid' => $context->instanceid], $userparams);
+        $swapdetailids = $DB->get_records_sql($sql, $params);
+        if (!empty($swapdetailids)) {
+            $DB->delete_records_list('block_stash_swap_detail', 'id', array_keys($swapdetailids));
+        }
+
+        $sql = "SELECT ss.id
+                  FROM {block_stash_swap} ss
+                  JOIN {" . stash::TABLE . "} s
+                    ON s.id = ss.stashid
+                 WHERE s.courseid = :courseid
+                   AND (ss.initiator $userinsql OR ss.receiver $userinsql)";
+
+        $swapids = $DB->get_records_sql($sql, $params);
+        if (!empty($swapids)) {
+            $DB->delete_records_list('block_stash_swap', 'id', array_keys($swapids));
+        }
+    }
+
+    /**
      * Get drop IDs from item IDs.
      *
-     * @param array $itemids The item IDs.
+     * @param array $itemids
      * @return array
      */
     protected static function get_dropids_from_itemids(array $itemids) {
@@ -389,14 +498,14 @@ class provider implements
             return [];
         }
 
-        list($insql, $inparams) = $DB->get_in_or_equal($itemids, SQL_PARAMS_NAMED);
+        [$insql, $inparams] = $DB->get_in_or_equal($itemids, SQL_PARAMS_NAMED);
         return $DB->get_fieldset_select(drop::TABLE, 'id', "itemid $insql", $inparams);
     }
 
     /**
      * Get item IDs from course IDs.
      *
-     * @param array $courseids The course IDs.
+     * @param array $courseids
      * @return array
      */
     protected static function get_itemids_from_courseids(array $courseids) {
@@ -405,7 +514,7 @@ class provider implements
             return [];
         }
 
-        list($insql, $inparams) = $DB->get_in_or_equal($courseids, SQL_PARAMS_NAMED);
+        [$insql, $inparams] = $DB->get_in_or_equal($courseids, SQL_PARAMS_NAMED);
         $sql = "SELECT i.id
                   FROM {" . item::TABLE . "} i
                   JOIN {" . stash::TABLE . "} s
@@ -414,6 +523,12 @@ class provider implements
         return $DB->get_fieldset_sql($sql, $inparams);
     }
 
+    /**
+     * Get swap detail IDs from course IDs.
+     *
+     * @param array $courseids
+     * @return array
+     */
     protected static function get_swap_detail_ids_from_courseids(array $courseids) {
         global $DB;
 
@@ -421,16 +536,21 @@ class provider implements
             return [];
         }
 
-        list($insql, $inparams) = $DB->get_in_or_equal($courseids, SQL_PARAMS_NAMED);
+        [$insql, $inparams] = $DB->get_in_or_equal($courseids, SQL_PARAMS_NAMED);
         $sql = "SELECT sd.id
                   FROM {block_stash_swap_detail} sd
                   JOIN {block_stash_swap} ss ON ss.id = sd.swapid
                   JOIN {block_stash} s ON s.id = ss.stashid
                  WHERE s.courseid $insql";
         return $DB->get_fieldset_sql($sql, $inparams);
-
     }
 
+    /**
+     * Get stash IDs from course IDs.
+     *
+     * @param array $courseids
+     * @return array
+     */
     protected static function get_stashids_from_courseids(array $courseids) {
         global $DB;
 
@@ -438,7 +558,7 @@ class provider implements
             return [];
         }
 
-        list($insql, $inparams) = $DB->get_in_or_equal($courseids, SQL_PARAMS_NAMED);
+        [$insql, $inparams] = $DB->get_in_or_equal($courseids, SQL_PARAMS_NAMED);
         $sql = "SELECT s.id
                   FROM {block_stash} s
                  WHERE s.courseid $insql";
@@ -448,15 +568,20 @@ class provider implements
     /**
      * Loop and export from a recordset.
      *
-     * @param moodle_recordset $recordset The recordset.
-     * @param string $splitkey The record key to determine when to export.
-     * @param mixed $initial The initial data to reduce from.
-     * @param callable $reducer The function to return the dataset, receives current dataset, and the current record.
-     * @param callable $export The function to export the dataset, receives the last value from $splitkey and the dataset.
+     * @param moodle_recordset $recordset
+     * @param string $splitkey
+     * @param mixed $initial
+     * @param callable $reducer
+     * @param callable $export
      * @return void
      */
-    protected static function recordset_loop_and_export(\moodle_recordset $recordset, $splitkey, $initial,
-            callable $reducer, callable $export) {
+    protected static function recordset_loop_and_export(
+        \moodle_recordset $recordset,
+        $splitkey,
+        $initial,
+        callable $reducer,
+        callable $export
+    ) {
 
         $data = $initial;
         $lastid = null;
@@ -476,6 +601,12 @@ class provider implements
         }
     }
 
+    /**
+     * Transform a swap status code into a human-readable string.
+     *
+     * @param int $statuscode
+     * @return string
+     */
     private static function transform_swap_status($statuscode) {
         switch ($statuscode) {
             case swap::BLOCK_STASH_SWAP_DECLINE:
@@ -494,5 +625,4 @@ class provider implements
                 return get_string('notrecorded', 'block_stash');
         }
     }
-
 }
